@@ -1,116 +1,157 @@
 import asyncio
+import json
+import os
+import subprocess
+import shlex
+from pathlib import Path
+import sys
 
 from mcp.server.models import InitializationOptions
 import mcp.types as types
 from mcp.server import NotificationOptions, Server
-from pydantic import AnyUrl
 import mcp.server.stdio
 
-# Store notes as a simple key-value dict to demonstrate state management
-notes: dict[str, str] = {}
+# Simple in-memory configuration
+CONFIG_FILE = Path(__file__).parent / "config.json"
+with open(CONFIG_FILE, "r") as f:
+    config = json.load(f)
 
 server = Server("simple-bash-mcp")
 
-@server.list_resources()
-async def handle_list_resources() -> list[types.Resource]:
-    """
-    List available note resources.
-    Each note is exposed as a resource with a custom note:// URI scheme.
-    """
-    return [
-        types.Resource(
-            uri=AnyUrl(f"note://internal/{name}"),
-            name=f"Note: {name}",
-            description=f"A simple note named {name}",
-            mimeType="text/plain",
+def validate_command(command_str):
+    """Validate that the command is allowed to execute."""
+    # Extract the base command (first word before any spaces)
+    base_command = command_str.strip().split()[0]
+    
+    # Check if base command is in allowed list
+    if base_command not in config["allowedCommands"]:
+        return False, f"Command '{base_command}' is not in the allowed commands list"
+    
+    # Optional: Check for command injection patterns if strict validation is enabled
+    if config.get("validateCommandsStrictly", True):
+        injection_patterns = [";", "&&", "||", "`", "$(",  ">", "<", "|", "#"]
+        for pattern in injection_patterns:
+            if pattern in command_str:
+                return False, f"Potential command injection detected: '{pattern}'"
+    
+    return True, ""
+
+def validate_directory(directory):
+    """Validate that the directory is allowed for command execution."""
+    directory_path = Path(directory).resolve()
+    
+    # Check if directory is in allowed list or is a subdirectory of an allowed directory
+    for allowed_dir in config["allowedDirectories"]:
+        allowed_path = Path(allowed_dir).resolve()
+        if directory_path == allowed_path or allowed_path in directory_path.parents:
+            return True, ""
+    
+    return False, f"Directory '{directory}' is not in the allowed directories list"
+
+async def execute_command(command, cwd, timeout=None):
+    """Execute a command and return its result."""
+    # Validate command and directory
+    cmd_valid, cmd_error = validate_command(command)
+    if not cmd_valid:
+        return {
+            "success": False,
+            "error": cmd_error,
+            "output": "",
+            "exitCode": 1,
+            "command": command
+        }
+    
+    dir_valid, dir_error = validate_directory(cwd)
+    if not dir_valid:
+        return {
+            "success": False,
+            "error": dir_error,
+            "output": "",
+            "exitCode": 1,
+            "command": command
+        }
+    
+    # Execute the command
+    try:
+        # Use timeout if specified
+        timeout_sec = timeout if timeout else None
+        
+        # Prepare environment by explicitly using bash with proper environment
+        # Use a login shell (-l) to ensure profile/bashrc is loaded
+        full_command = f"/bin/bash -l -c '{command}'"
+        
+        # Execute the command with subprocess
+        process = await asyncio.create_subprocess_shell(
+            full_command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cwd,
+            env=os.environ.copy()  # Use current environment
         )
-        for name in notes
-    ]
-
-@server.read_resource()
-async def handle_read_resource(uri: AnyUrl) -> str:
-    """
-    Read a specific note's content by its URI.
-    The note name is extracted from the URI host component.
-    """
-    if uri.scheme != "note":
-        raise ValueError(f"Unsupported URI scheme: {uri.scheme}")
-
-    name = uri.path
-    if name is not None:
-        name = name.lstrip("/")
-        return notes[name]
-    raise ValueError(f"Note not found: {name}")
-
-@server.list_prompts()
-async def handle_list_prompts() -> list[types.Prompt]:
-    """
-    List available prompts.
-    Each prompt can have optional arguments to customize its behavior.
-    """
-    return [
-        types.Prompt(
-            name="summarize-notes",
-            description="Creates a summary of all notes",
-            arguments=[
-                types.PromptArgument(
-                    name="style",
-                    description="Style of the summary (brief/detailed)",
-                    required=False,
-                )
-            ],
-        )
-    ]
-
-@server.get_prompt()
-async def handle_get_prompt(
-    name: str, arguments: dict[str, str] | None
-) -> types.GetPromptResult:
-    """
-    Generate a prompt by combining arguments with server state.
-    The prompt includes all current notes and can be customized via arguments.
-    """
-    if name != "summarize-notes":
-        raise ValueError(f"Unknown prompt: {name}")
-
-    style = (arguments or {}).get("style", "brief")
-    detail_prompt = " Give extensive details." if style == "detailed" else ""
-
-    return types.GetPromptResult(
-        description="Summarize the current notes",
-        messages=[
-            types.PromptMessage(
-                role="user",
-                content=types.TextContent(
-                    type="text",
-                    text=f"Here are the current notes to summarize:{detail_prompt}\n\n"
-                    + "\n".join(
-                        f"- {name}: {content}"
-                        for name, content in notes.items()
-                    ),
-                ),
+        
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(), 
+                timeout=timeout_sec
             )
-        ],
-    )
+            
+            # Decode stdout and stderr
+            stdout_str = stdout.decode('utf-8', errors='replace')
+            stderr_str = stderr.decode('utf-8', errors='replace')
+            
+            # Combine output and limit size if needed
+            output = stdout_str
+            if stderr_str:
+                output += f"\nSTDERR:\n{stderr_str}"
+                
+            max_size = config.get("maxOutputSize", 1048576)  # Default 1MB
+            if len(output) > max_size:
+                output = output[:max_size] + "\n... [OUTPUT TRUNCATED]"
+            
+            return {
+                "success": process.returncode == 0,
+                "output": output,
+                "error": stderr_str if process.returncode != 0 else "",
+                "exitCode": process.returncode,
+                "command": command
+            }
+            
+        except asyncio.TimeoutError:
+            # Kill the process if it times out
+            process.kill()
+            return {
+                "success": False,
+                "output": "",
+                "error": f"Command execution timed out after {timeout_sec} seconds",
+                "exitCode": -1,
+                "command": command
+            }
+            
+    except Exception as e:
+        return {
+            "success": False,
+            "output": "",
+            "error": f"Error executing command: {str(e)}",
+            "exitCode": -1,
+            "command": command
+        }
 
 @server.list_tools()
 async def handle_list_tools() -> list[types.Tool]:
-    """
-    List available tools.
-    Each tool specifies its arguments using JSON Schema validation.
-    """
+    """List available tools."""
     return [
         types.Tool(
-            name="add-note",
-            description="Add a new note",
+            name="execute_command",
+            description="Execute a bash command in a secure environment",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string"},
-                    "content": {"type": "string"},
+                    "command": {"type": "string", "description": "The bash command to execute"},
+                    "cwd": {"type": "string", "description": "Working directory for the command"},
+                    "timeout": {"type": "number", "description": "Optional timeout in seconds"}
                 },
-                "required": ["name", "content"],
-            },
+                "required": ["command", "cwd"]
+            }
         )
     ]
 
@@ -118,36 +159,34 @@ async def handle_list_tools() -> list[types.Tool]:
 async def handle_call_tool(
     name: str, arguments: dict | None
 ) -> list[types.TextContent | types.ImageContent | types.EmbeddedResource]:
-    """
-    Handle tool execution requests.
-    Tools can modify server state and notify clients of changes.
-    """
-    if name != "add-note":
+    """Handle tool execution requests."""
+    if name != "execute_command":
         raise ValueError(f"Unknown tool: {name}")
 
     if not arguments:
         raise ValueError("Missing arguments")
 
-    note_name = arguments.get("name")
-    content = arguments.get("content")
+    command = arguments.get("command")
+    cwd = arguments.get("cwd")
+    timeout = arguments.get("timeout")
 
-    if not note_name or not content:
-        raise ValueError("Missing name or content")
+    if not command or not cwd:
+        raise ValueError("Missing required command or cwd parameter")
 
-    # Update server state
-    notes[note_name] = content
-
-    # Notify clients that resources have changed
-    await server.request_context.session.send_resource_list_changed()
-
+    result = await execute_command(command, cwd, timeout)
+    
+    # Format output as text content
     return [
         types.TextContent(
             type="text",
-            text=f"Added note '{note_name}' with content: {content}",
+            text=json.dumps(result, indent=2)
         )
     ]
 
 async def main():
+    # Print a simple startup message to stderr
+    print("Simple-Bash MCP Server starting...", file=sys.stderr)
+    
     # Run the server using stdin/stdout streams
     async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
         await server.run(

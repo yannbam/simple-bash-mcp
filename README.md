@@ -1,32 +1,56 @@
-# simple-bash-mcp MCP server
+# simple-bash-mcp MCP Server
 
-A simple bash MCP Server
+A simple, secure Bash command execution MCP server.
 
-## Components
+## Features
 
-### Resources
+- Execute individual bash commands in a secure environment
+- Multiple security layers including command and directory whitelists
+- Optional timeout and output size limitations
+- Simple, stateless design
 
-The server implements a simple note storage system with:
-- Custom note:// URI scheme for accessing individual notes
-- Each note resource has a name, description and text/plain mimetype
+## Security Controls
 
-### Prompts
+- **Command Whitelist**: Only pre-approved commands can be executed
+- **Directory Whitelist**: Commands can only run in specified directories
+- **Pattern Validation**: Prevents command injection attacks
+- **Output Limiting**: Prevents excessive data return
+- **Shell Isolation**: Commands run in a controlled bash environment
 
-The server provides a single prompt:
-- summarize-notes: Creates summaries of all stored notes
-  - Optional "style" argument to control detail level (brief/detailed)
-  - Generates prompt combining all current notes with style preference
+## Tool Specification
 
-### Tools
+The server provides a single tool:
 
-The server implements one tool:
-- add-note: Adds a new note to the server
-  - Takes "name" and "content" as required string arguments
-  - Updates server state and notifies clients of resource changes
+- **execute_command**: Executes a bash command securely
+  - Parameters:
+    - `command` (string, required): The bash command to execute
+    - `cwd` (string, required): Working directory for command execution
+    - `timeout` (number, optional): Timeout in seconds
+  - Returns:
+    - A JSON object with:
+      - `success`: Boolean indicating if command succeeded
+      - `output`: Command output (stdout+stderr)
+      - `error`: Error message (if any)
+      - `exitCode`: The command's exit code
+      - `command`: Original command string
 
 ## Configuration
 
-[TODO: Add configuration details specific to your implementation]
+The server uses a simple JSON configuration file at `src/simple_bash_mcp/config.json`:
+
+```json
+{
+  "allowedCommands": ["ls", "cat", "echo", "pwd", "grep", "find", "head", "tail", "wc"],
+  "allowedDirectories": ["/tmp", "/home"],
+  "validateCommandsStrictly": true,
+  "maxOutputSize": 1048576
+}
+```
+
+- `allowedCommands`: List of executable base commands
+- `allowedDirectories`: Where commands can be executed
+- `validateCommandsStrictly`: Enable pattern-based injection prevention
+- `maxOutputSize`: Maximum output size in bytes (default: 1MB)
 
 ## Quickstart
 
@@ -39,7 +63,8 @@ On Windows: `%APPDATA%/Claude/claude_desktop_config.json`
 
 <details>
   <summary>Development/Unpublished Servers Configuration</summary>
-  ```
+  
+  ```json
   "mcpServers": {
     "simple-bash-mcp": {
       "command": "uv",
@@ -56,7 +81,8 @@ On Windows: `%APPDATA%/Claude/claude_desktop_config.json`
 
 <details>
   <summary>Published Servers Configuration</summary>
-  ```
+  
+  ```json
   "mcpServers": {
     "simple-bash-mcp": {
       "command": "uvx",
@@ -84,28 +110,32 @@ uv sync
 uv build
 ```
 
-This will create source and wheel distributions in the `dist/` directory.
-
 3. Publish to PyPI:
 ```bash
 uv publish
 ```
 
-Note: You'll need to set PyPI credentials via environment variables or command flags:
-- Token: `--token` or `UV_PUBLISH_TOKEN`
-- Or username/password: `--username`/`UV_PUBLISH_USERNAME` and `--password`/`UV_PUBLISH_PASSWORD`
-
 ### Debugging
 
-Since MCP servers run over stdio, debugging can be challenging. For the best debugging
-experience, we strongly recommend using the [MCP Inspector](https://github.com/modelcontextprotocol/inspector).
-
-
-You can launch the MCP Inspector via [`npm`](https://docs.npmjs.com/downloading-and-installing-node-js-and-npm) with this command:
+For debugging, use the [MCP Inspector](https://github.com/modelcontextprotocol/inspector):
 
 ```bash
 npx @modelcontextprotocol/inspector uv --directory /home/jan/ai/claude/claude_fs/simple-bash-mcp run simple-bash-mcp
 ```
 
+## Security Best Practices
 
-Upon launching, the Inspector will display a URL that you can access in your browser to begin debugging.
+When using Simple-Bash MCP:
+
+1. **Maintain strict whitelists**
+   - Keep the command and directory lists minimal
+   - Only include essential commands
+
+2. **Keep strict validation enabled**
+   - Prevents command injection and chaining
+
+3. **Use timeouts when needed**
+   - Set timeouts for potentially long-running commands
+
+4. **Test commands thoroughly**
+   - Verify all security checks function as expected

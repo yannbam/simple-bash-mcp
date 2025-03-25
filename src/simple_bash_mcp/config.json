@@ -1,0 +1,10 @@
+{
+  "allowedCommands": [
+    "ls", "cat", "echo", "pwd", "grep", "find", "head", "tail", "wc",
+    "python", "python3", "uv", "git", "npm", "node", "npx",
+    "mkdir", "touch", "rm", "cp", "mv"
+  ],
+  "allowedDirectories": ["/tmp", "/home"],
+  "validateCommandsStrictly": true,
+  "maxOutputSize": 1048576
+}
