@@ -201,3 +201,7 @@ async def main():
                 ),
             ),
         )
+
+# This ensures the main() function is called when the script is run directly
+if __name__ == "__main__":
+    asyncio.run(main())
