@@ -22,6 +22,7 @@ Simple-Bash is a lightweight Model Context Protocol (MCP) server written in Pyth
    - JSON-based configuration file for all security settings
    - Easy configuration of allowed commands and directories
    - Configurable security parameters
+   - Auto-update of configuration when file changes without server restart
 
 4. **MCP Protocol Integration**
    - Implementation using the MCP Python SDK
@@ -84,6 +85,14 @@ The configuration file (JSON format) will include:
 }
 ```
 
+The server implements a configuration auto-update mechanism that:
+1. Periodically checks the last modified time of the configuration file (every 5 seconds)
+2. Reloads the configuration when changes are detected
+3. Uses thread-safe operations with a lock to ensure consistent configuration state
+4. Logs configuration change events to stderr for monitoring
+
+This allows administrators to modify the allowed commands, directories, and other settings without restarting the server or disrupting ongoing operations.
+
 ### Command Validation Process
 
 1. Extract the base command from the full command string
@@ -121,7 +130,7 @@ The server will expose a single MCP tool:
    - Setup proper dependency management
 
 2. **Core Components**
-   - Configuration loader and validator
+   - Configuration loader and validator with auto-update capability
    - Command and directory validation utilities
    - Command execution with optional timeout handling
    - Output limitation logic

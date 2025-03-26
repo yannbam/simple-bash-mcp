@@ -8,6 +8,7 @@ A simple, secure Bash command execution MCP server.
 - Multiple security layers including command and directory whitelists
 - Optional timeout and output size limitations
 - Simple, stateless design
+- Auto-update of configuration when config.json changes without server restart
 
 ## Security Controls
 
@@ -51,6 +52,8 @@ The server uses a simple JSON configuration file at `src/simple_bash_mcp/config.
 - `allowedDirectories`: Where commands can be executed
 - `validateCommandsStrictly`: Enable pattern-based injection prevention
 - `maxOutputSize`: Maximum output size in bytes (default: 1MB)
+
+The configuration file is monitored for changes and automatically reloaded when modified, allowing you to update settings without restarting the server.
 
 ## Quickstart
 

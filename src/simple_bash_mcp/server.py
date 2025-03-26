@@ -5,6 +5,8 @@ import subprocess
 import shlex
 from pathlib import Path
 import sys
+import time
+import threading
 
 from mcp.server.models import InitializationOptions
 import mcp.types as types
@@ -13,42 +15,80 @@ import mcp.server.stdio
 
 from mcp.server.lowlevel import NotificationOptions
 
-# Simple in-memory configuration
+# Configuration file path
 CONFIG_FILE = Path(__file__).parent / "config.json"
-with open(CONFIG_FILE, "r") as f:
-    config = json.load(f)
+
+# Configuration and tracking variables
+config = {}
+config_last_modified = 0
+config_lock = threading.RLock()
+
+# Load configuration initially
+def load_config():
+    global config, config_last_modified
+    with config_lock:
+        with open(CONFIG_FILE, "r") as f:
+            config = json.load(f)
+        config_last_modified = os.path.getmtime(CONFIG_FILE)
+        print(f"Configuration loaded at {time.strftime('%Y-%m-%d %H:%M:%S')}", file=sys.stderr)
+        return config
+
+# Check for configuration changes
+def check_config_updates():
+    global config_last_modified
+    try:
+        current_mtime = os.path.getmtime(CONFIG_FILE)
+        if current_mtime > config_last_modified:
+            print(f"Configuration file changed, reloading...", file=sys.stderr)
+            load_config()
+            return True
+        return False
+    except Exception as e:
+        print(f"Error checking configuration updates: {str(e)}", file=sys.stderr)
+        return False
+
+# Initialize configuration
+load_config()
 
 server = Server("simple-bash-mcp")
 
 def validate_command(command_str):
     """Validate that the command is allowed to execute."""
-    # Extract the base command (first word before any spaces)
-    base_command = command_str.strip().split()[0]
+    # Check for configuration updates
+    check_config_updates()
     
-    # Check if base command is in allowed list
-    if base_command not in config["allowedCommands"]:
-        return False, f"Command '{base_command}' is not in the allowed commands list"
-    
-    # Optional: Check for command injection patterns if strict validation is enabled
-    if config.get("validateCommandsStrictly", True):
-        injection_patterns = [";", "&&", "||", "`", "$(",  ">", "<", "|", "#"]
-        for pattern in injection_patterns:
-            if pattern in command_str:
-                return False, f"Potential command injection detected: '{pattern}'"
-    
-    return True, ""
+    with config_lock:
+        # Extract the base command (first word before any spaces)
+        base_command = command_str.strip().split()[0]
+        
+        # Check if base command is in allowed list
+        if base_command not in config["allowedCommands"]:
+            return False, f"Command '{base_command}' is not in the allowed commands list"
+        
+        # Optional: Check for command injection patterns if strict validation is enabled
+        if config.get("validateCommandsStrictly", True):
+            injection_patterns = [";", "&&", "||", "`", "$(",  ">", "<", "|", "#"]
+            for pattern in injection_patterns:
+                if pattern in command_str:
+                    return False, f"Potential command injection detected: '{pattern}'"
+        
+        return True, ""
 
 def validate_directory(directory):
     """Validate that the directory is allowed for command execution."""
-    directory_path = Path(directory).resolve()
+    # Check for configuration updates
+    check_config_updates()
     
-    # Check if directory is in allowed list or is a subdirectory of an allowed directory
-    for allowed_dir in config["allowedDirectories"]:
-        allowed_path = Path(allowed_dir).resolve()
-        if directory_path == allowed_path or allowed_path in directory_path.parents:
-            return True, ""
-    
-    return False, f"Directory '{directory}' is not in the allowed directories list"
+    with config_lock:
+        directory_path = Path(directory).resolve()
+        
+        # Check if directory is in allowed list or is a subdirectory of an allowed directory
+        for allowed_dir in config["allowedDirectories"]:
+            allowed_path = Path(allowed_dir).resolve()
+            if directory_path == allowed_path or allowed_path in directory_path.parents:
+                return True, ""
+        
+        return False, f"Directory '{directory}' is not in the allowed directories list"
 
 async def execute_command(command, cwd, timeout=None):
     """Execute a command and return its result."""
@@ -106,7 +146,11 @@ async def execute_command(command, cwd, timeout=None):
             if stderr_str:
                 output += f"\nSTDERR:\n{stderr_str}"
                 
-            max_size = config.get("maxOutputSize", 1048576)  # Default 1MB
+            # Check for configuration updates before applying the settings
+            check_config_updates()
+            
+            with config_lock:
+                max_size = config.get("maxOutputSize", 1048576)  # Default 1MB
             if len(output) > max_size:
                 output = output[:max_size] + "\n... [OUTPUT TRUNCATED]"
             
@@ -195,9 +239,20 @@ async def handle_list_prompts() -> list[types.Prompt]:
     """Return an empty list of prompts."""
     return []
 
+# Create a periodic task to check for configuration file changes
+async def config_monitor():
+    """Periodically check for changes to the config file."""
+    while True:
+        await asyncio.sleep(5)  # Check every 5 seconds
+        if check_config_updates():
+            print(f"Configuration updated at {time.strftime('%Y-%m-%d %H:%M:%S')}", file=sys.stderr)
+
 async def main():
     # Print a simple startup message to stderr
     print("Simple-Bash MCP Server starting...", file=sys.stderr)
+    
+    # Start the configuration monitor task
+    monitor_task = asyncio.create_task(config_monitor())
     
 
     # my_notification_options = NotificationOptions(
