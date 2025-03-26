@@ -11,6 +11,8 @@ import mcp.types as types
 from mcp.server import NotificationOptions, Server
 import mcp.server.stdio
 
+from mcp.server.lowlevel import NotificationOptions
+
 # Simple in-memory configuration
 CONFIG_FILE = Path(__file__).parent / "config.json"
 with open(CONFIG_FILE, "r") as f:
@@ -183,10 +185,41 @@ async def handle_call_tool(
         )
     ]
 
+@server.list_resources()
+async def handle_list_resources() -> list[types.Resource]:
+    """Return an empty list of resources."""
+    return []
+
+@server.list_prompts()
+async def handle_list_prompts() -> list[types.Prompt]:
+    """Return an empty list of prompts."""
+    return []
+
 async def main():
     # Print a simple startup message to stderr
     print("Simple-Bash MCP Server starting...", file=sys.stderr)
     
+
+    # my_notification_options = NotificationOptions(
+    #     tools_changed=True,  # Set to True if you plan to send notifications
+    #     resources_changed=True,
+    #     prompts_changed=True
+    # )
+
+    # capabilities = server.get_capabilities(
+    #     notification_options=my_notification_options,
+    #     experimental_capabilities={},
+    # )
+
+    # print(f"Server capabilities: {capabilities}", file=sys.stderr)
+    # # Or try to access attributes
+    # print(f"Tools capability: {getattr(capabilities, 'tools', None)}", file=sys.stderr)
+    # print(f"Resources capability: {getattr(capabilities, 'resources', None)}", file=sys.stderr)
+    # print(f"Prompts capability: {getattr(capabilities, 'prompts', None)}", file=sys.stderr)
+
+
+
+
     # Run the server using stdin/stdout streams
     async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
         await server.run(
@@ -195,12 +228,21 @@ async def main():
             InitializationOptions(
                 server_name="simple-bash-mcp",
                 server_version="0.1.0",
-                capabilities=server.get_capabilities(
-                    notification_options=NotificationOptions(),
-                    experimental_capabilities={},
-                ),
+                capabilities={
+                  # Only declare the tools capability - don't include resources or prompts
+                    "tools": {
+                    "listChanged": True
+            },
+        },
             ),
         )
+
+                # capabilities=server.get_capabilities(
+                #     # notification_options=NotificationOptions(),
+                #     notification_options=my_notification_options,                    
+                #     experimental_capabilities={},
+
+
 
 # This ensures the main() function is called when the script is run directly
 if __name__ == "__main__":
