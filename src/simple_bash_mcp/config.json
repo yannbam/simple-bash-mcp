@@ -4,7 +4,7 @@
     "python", "python3", "uv", "git", "npm", "node", "npx",
     "mkdir", "touch", "rm", "cp", "mv"
   ],
-  "allowedDirectories": ["/tmp", "/home"],
-  "validateCommandsStrictly": true,
+  "allowedDirectories": ["/tmp"],
+  "validateCommandsStrictly": false,
   "maxOutputSize": 1048576
 }
