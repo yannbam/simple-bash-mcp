@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 import shlex
+import signal
 from pathlib import Path
 import sys
 import time
@@ -97,10 +98,17 @@ def validate_directory(directory):
         return False, f"Directory '{directory}' is not in the allowed directories list.\n\nAllowed directories are:\n- {allowed_dirs}\n\nNote: Subdirectories of these allowed directories are also permitted."
 
 async def execute_command(command, cwd, timeout=None):
-    """Execute a command and return its result."""
+    """Execute a command and return its result.
+    
+    Important: This implementation carefully isolates subprocess I/O from the MCP server's
+    stdio transport to prevent interference with client-server communication.
+    """
+    print(f"MCP server: executing command '{command}' in '{cwd}'", file=sys.stderr)
+    
     # Validate command and directory
     cmd_valid, cmd_error = validate_command(command)
     if not cmd_valid:
+        print(f"MCP server: command validation failed: {cmd_error}", file=sys.stderr)
         return {
             "success": False,
             "error": cmd_error,
@@ -111,6 +119,7 @@ async def execute_command(command, cwd, timeout=None):
     
     dir_valid, dir_error = validate_directory(cwd)
     if not dir_valid:
+        print(f"MCP server: directory validation failed: {dir_error}", file=sys.stderr)
         return {
             "success": False,
             "error": dir_error,
@@ -123,72 +132,136 @@ async def execute_command(command, cwd, timeout=None):
     try:
         # Use timeout if specified
         timeout_sec = timeout if timeout else None
+        print(f"MCP server: timeout set to {timeout_sec} seconds", file=sys.stderr)
         
+        # Rather than using asyncio subprocess directly, use a more isolated approach with subprocess module
+        # This helps ensure the parent's stdio transport isn't affected by terminal manipulations
+        
+        # Escape the command properly for shell execution
+        escaped_command = command.replace("'", "'\"'\"'")
         # Prepare environment by explicitly using bash with proper environment
-        # Use a login shell (-l) to ensure profile/bashrc is loaded
-        full_command = f"/bin/bash -l -c '{command}'"
+        # Add a TERM=dumb to avoid fancy terminal output that might corrupt stdio streams
+        # Also redirect stdout/stderr to files to avoid any terminal control sequences
         
-        # Execute the command with subprocess
-        process = await asyncio.create_subprocess_shell(
-            full_command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=cwd,
-            env=os.environ.copy()  # Use current environment
-        )
+        # Create temporary files for output
+        output_file = os.path.join(cwd, ".mcp_cmd_output.txt")
+        error_file = os.path.join(cwd, ".mcp_cmd_error.txt")
+        
+        # Construct a command that runs isolated and redirects output to files
+        bash_script = f"cd {shlex.quote(cwd)} && TERM=dumb /bin/bash -l -c {shlex.quote(command)} > {shlex.quote(output_file)} 2> {shlex.quote(error_file)}"
+        
+        print(f"MCP server: executing bash script: {bash_script}", file=sys.stderr)
         
         try:
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(), 
-                timeout=timeout_sec
+            # Run process in a completely separate process group to avoid terminal interference
+            process = subprocess.Popen(
+                ['/bin/bash', '-c', bash_script],
+                stdout=subprocess.DEVNULL,  # Explicitly avoid stdout/stderr
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,   # Explicitly avoid stdin 
+                env=dict(os.environ, TERM="dumb"),  # Force dumb terminal
+                start_new_session=True      # Create a new process group
             )
             
-            # Decode stdout and stderr
-            stdout_str = stdout.decode('utf-8', errors='replace')
-            stderr_str = stderr.decode('utf-8', errors='replace')
+            # Create asyncio task to wait for process completion with timeout
+            async def wait_for_process():
+                loop = asyncio.get_running_loop()
+                return await loop.run_in_executor(None, process.wait)
             
-            # Combine output and limit size if needed
-            output = stdout_str
-            if stderr_str:
-                output += f"\nSTDERR:\n{stderr_str}"
+            try:
+                exit_code = await asyncio.wait_for(wait_for_process(), timeout=timeout_sec)
                 
-            # Check for configuration updates before applying the settings
-            check_config_updates()
-            
-            with config_lock:
-                max_size = config.get("maxOutputSize", 1048576)  # Default 1MB
-            if len(output) > max_size:
-                output = output[:max_size] + "\n... [OUTPUT TRUNCATED]"
-            
-            return {
-                "success": process.returncode == 0,
-                "output": output,
-                "error": stderr_str if process.returncode != 0 else "",
-                "exitCode": process.returncode,
-                "command": command
-            }
-            
-        except asyncio.TimeoutError:
-            # Kill the process if it times out
-            try:
-                process.kill()
-                await process.wait()  # Ensure process is terminated
-            except:
-                pass
-            return {
-                "success": False,
-                "output": "",
-                "error": f"Command execution timed out after {timeout_sec} seconds",
-                "exitCode": -1,
-                "command": command
-            }
-            
+                # Read output from temp files
+                stdout_str = ""
+                stderr_str = ""
+                try:
+                    if os.path.exists(output_file):
+                        with open(output_file, 'r', encoding='utf-8', errors='replace') as f:
+                            stdout_str = f.read()
+                    if os.path.exists(error_file):
+                        with open(error_file, 'r', encoding='utf-8', errors='replace') as f:
+                            stderr_str = f.read()
+                except Exception as e:
+                    print(f"MCP server: Error reading output files: {str(e)}", file=sys.stderr)
+                finally:
+                    # Clean up temp files
+                    try:
+                        if os.path.exists(output_file):
+                            os.unlink(output_file)
+                        if os.path.exists(error_file):
+                            os.unlink(error_file)
+                    except Exception as e:
+                        print(f"MCP server: Error cleaning up temp files: {str(e)}", file=sys.stderr)
+                
+                # Combine output and limit size if needed
+                output = stdout_str
+                if stderr_str:
+                    output += f"\nSTDERR:\n{stderr_str}"
+                    
+                # Check for configuration updates before applying the settings
+                check_config_updates()
+                
+                with config_lock:
+                    max_size = config.get("maxOutputSize", 1048576)  # Default 1MB
+                if len(output) > max_size:
+                    output = output[:max_size] + "\n... [OUTPUT TRUNCATED]"
+                
+                print(f"MCP server: command completed with exit code {exit_code}", file=sys.stderr)
+                return {
+                    "success": exit_code == 0,
+                    "output": output,
+                    "error": stderr_str if exit_code != 0 else "",
+                    "exitCode": exit_code,
+                    "command": command
+                }
+                
+            except asyncio.TimeoutError:
+                # Kill the process if it times out
+                print(f"MCP server: command timed out after {timeout_sec} seconds", file=sys.stderr)
+                try:
+                    # Kill entire process group
+                    os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+                    # Give it a second to terminate gracefully
+                    await asyncio.sleep(1)
+                    # Force kill if still running
+                    if process.poll() is None:
+                        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                except Exception as e:
+                    print(f"MCP server: Error killing process: {str(e)}", file=sys.stderr)
+                    
+                # Clean up temp files
+                try:
+                    if os.path.exists(output_file):
+                        os.unlink(output_file)
+                    if os.path.exists(error_file):
+                        os.unlink(error_file)
+                except Exception as e:
+                    print(f"MCP server: Error cleaning up temp files: {str(e)}", file=sys.stderr)
+                    
+                return {
+                    "success": False,
+                    "output": "",
+                    "error": f"Command execution timed out after {timeout_sec} seconds",
+                    "exitCode": -1,
+                    "command": command
+                }
         except Exception as e:
+            print(f"MCP server: Error in process execution: {str(e)}", file=sys.stderr)
+            # Clean up process if needed
             try:
                 process.kill()
-                await process.wait()  # Ensure process is terminated
             except:
                 pass
+                
+            # Clean up temp files
+            try:
+                if os.path.exists(output_file):
+                    os.unlink(output_file)
+                if os.path.exists(error_file):
+                    os.unlink(error_file)
+            except Exception as e:
+                print(f"MCP server: Error cleaning up temp files: {str(e)}", file=sys.stderr)
+                
             return {
                 "success": False,
                 "output": "",
@@ -198,6 +271,7 @@ async def execute_command(command, cwd, timeout=None):
             }
             
     except Exception as e:
+        print(f"MCP server: Unexpected error: {str(e)}", file=sys.stderr)
         return {
             "success": False,
             "output": "",
@@ -290,32 +364,15 @@ async def main():
     # Start the configuration monitor task
     monitor_task = asyncio.create_task(config_monitor())
     
-
-    # my_notification_options = NotificationOptions(
-    #     tools_changed=True,  # Set to True if you plan to send notifications
-    #     resources_changed=True,
-    #     prompts_changed=True
-    # )
-
-    # capabilities = server.get_capabilities(
-    #     notification_options=my_notification_options,
-    #     experimental_capabilities={},
-    # )
-
-    # print(f"Server capabilities: {capabilities}", file=sys.stderr)
-    # # Or try to access attributes
-    # print(f"Tools capability: {getattr(capabilities, 'tools', None)}", file=sys.stderr)
-    # print(f"Resources capability: {getattr(capabilities, 'resources', None)}", file=sys.stderr)
-    # print(f"Prompts capability: {getattr(capabilities, 'prompts', None)}", file=sys.stderr)
-
-
-
-
-    # Run the server using stdin/stdout streams
-    async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream,
-            write_stream,
+    # Add proper exception handling around the core server loop
+    try:
+        # Run the server using stdin/stdout streams
+        async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
+            print("MCP server: stdio streams established", file=sys.stderr)
+            try:
+                await server.run(
+                    read_stream,
+                    write_stream,
             InitializationOptions(
                 server_name="simple-bash-mcp",
                 server_version="0.1.0",
@@ -334,10 +391,13 @@ async def main():
             ),
         )
 
-                # capabilities=server.get_capabilities(
-                #     # notification_options=NotificationOptions(),
-                #     notification_options=my_notification_options,                    
-                #     experimental_capabilities={},
+            except Exception as e:
+                print(f"MCP server: Error in server.run: {str(e)}", file=sys.stderr)
+                print(f"MCP server: Error type: {type(e).__name__}", file=sys.stderr)
+                import traceback
+                traceback.print_exc(file=sys.stderr)
+    except Exception as e:
+        print(f"MCP server: Fatal error in main loop: {str(e)}", file=sys.stderr)
 
 
 
