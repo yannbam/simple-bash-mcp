@@ -164,11 +164,29 @@ async def execute_command(command, cwd, timeout=None):
             
         except asyncio.TimeoutError:
             # Kill the process if it times out
-            process.kill()
+            try:
+                process.kill()
+                await process.wait()  # Ensure process is terminated
+            except:
+                pass
             return {
                 "success": False,
                 "output": "",
                 "error": f"Command execution timed out after {timeout_sec} seconds",
+                "exitCode": -1,
+                "command": command
+            }
+            
+        except Exception as e:
+            try:
+                process.kill()
+                await process.wait()  # Ensure process is terminated
+            except:
+                pass
+            return {
+                "success": False,
+                "output": "",
+                "error": f"Error executing command: {str(e)}",
                 "exitCode": -1,
                 "command": command
             }
