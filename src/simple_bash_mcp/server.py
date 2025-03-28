@@ -209,7 +209,8 @@ async def execute_command(command, cwd, timeout=None):
 @server.list_tools()
 async def handle_list_tools() -> list[types.Tool]:
     """List available tools."""
-    return [
+    try:
+        return [
         types.Tool(
             name="execute_command",
             description="Execute a bash command in a secure environment",
@@ -224,6 +225,9 @@ async def handle_list_tools() -> list[types.Tool]:
             }
         )
     ]
+    except Exception as e:
+        print(f"Error in handle_list_tools: {str(e)}", file=sys.stderr)
+        return []
 
 @server.call_tool()
 async def handle_call_tool(
@@ -256,12 +260,20 @@ async def handle_call_tool(
 @server.list_resources()
 async def handle_list_resources() -> list[types.Resource]:
     """Return an empty list of resources."""
-    return []
+    try:
+        return []
+    except Exception as e:
+        print(f"Error in handle_list_resources: {str(e)}", file=sys.stderr)
+        return []
 
 @server.list_prompts()
 async def handle_list_prompts() -> list[types.Prompt]:
     """Return an empty list of prompts."""
-    return []
+    try:
+        return []
+    except Exception as e:
+        print(f"Error in handle_list_prompts: {str(e)}", file=sys.stderr)
+        return []
 
 # Create a periodic task to check for configuration file changes
 async def config_monitor():
@@ -308,11 +320,17 @@ async def main():
                 server_name="simple-bash-mcp",
                 server_version="0.1.0",
                 capabilities={
-                  # Only declare the tools capability - don't include resources or prompts
+                    # Declare all capabilities implemented by this server
                     "tools": {
-                    "listChanged": True
-            },
-        },
+                        "listChanged": True
+                    },
+                    "resources": {
+                        "listChanged": True
+                    },
+                    "prompts": {
+                        "listChanged": True
+                    }
+                },
             ),
         )
 
