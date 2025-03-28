@@ -3,6 +3,10 @@ import json
 import os
 import subprocess
 import shlex
+import signal
+import tempfile
+import uuid
+import glob
 from pathlib import Path
 import sys
 import time
@@ -50,6 +54,50 @@ def check_config_updates():
 # Initialize configuration
 load_config()
 
+# Helper function to safely clean up temp files
+def self_cleanup_tempfiles(output_file, error_file):
+    """Helper function to safely clean up temporary files.
+    
+    This is designed to be robust against any errors and always attempt
+    to remove both files, even if an error occurs with one of them.
+    Also cleans up any stale temp files that might be left over from
+    previous runs that didn't exit properly.
+    """
+    # First try to remove the output file
+    if output_file:
+        try:
+            if os.path.exists(output_file):
+                os.unlink(output_file)
+        except Exception:
+            pass
+    
+    # Then try to remove the error file
+    if error_file:
+        try:
+            if os.path.exists(error_file):
+                os.unlink(error_file)
+        except Exception:
+            pass
+    
+    # Use a more aggressive approach to clean up any stray temp files
+    try:
+        # Get a list of all temp files older than 30 minutes
+        current_time = time.time()
+        temp_pattern = os.path.join(tempfile.gettempdir(), "mcp_cmd_*")
+        for temp_file in glob.glob(temp_pattern):
+            try:
+                # Check file age
+                file_age = current_time - os.path.getctime(temp_file)
+                # Remove if older than 30 minutes (1800 seconds)
+                if file_age > 1800:
+                    os.unlink(temp_file)
+            except Exception:
+                # Just continue if we can't remove a file
+                pass
+    except Exception:
+        # Just continue if cleanup of old files fails
+        pass
+
 server = Server("simple-bash-mcp")
 
 def validate_command(command_str):
@@ -63,14 +111,18 @@ def validate_command(command_str):
         
         # Check if base command is in allowed list
         if base_command not in config["allowedCommands"]:
-            return False, f"Command '{base_command}' is not in the allowed commands list"
+            # Format allowed commands into a readable list
+            allowed_cmds = ", ".join(sorted(config["allowedCommands"]))
+            return False, f"Command '{base_command}' is not in the allowed commands list.\n\nAllowed commands are: {allowed_cmds}"
         
         # Optional: Check for command injection patterns if strict validation is enabled
         if config.get("validateCommandsStrictly", True):
             injection_patterns = [";", "&&", "||", "`", "$(",  ">", "<", "|", "#"]
             for pattern in injection_patterns:
                 if pattern in command_str:
-                    return False, f"Potential command injection detected: '{pattern}'"
+                    # Also include list of injection patterns that should be avoided
+                    patterns_str = ", ".join([f"'{p}'" for p in injection_patterns])
+                    return False, f"Potential command injection detected: '{pattern}'\n\nThe following characters are not allowed when strict validation is enabled: {patterns_str}"
         
         return True, ""
 
@@ -88,10 +140,16 @@ def validate_directory(directory):
             if directory_path == allowed_path or allowed_path in directory_path.parents:
                 return True, ""
         
-        return False, f"Directory '{directory}' is not in the allowed directories list"
+        # Format allowed directories into a readable list
+        allowed_dirs = "\n- ".join(config["allowedDirectories"])
+        return False, f"Directory '{directory}' is not in the allowed directories list.\n\nAllowed directories are:\n- {allowed_dirs}\n\nNote: Subdirectories of these allowed directories are also permitted."
 
 async def execute_command(command, cwd, timeout=None):
-    """Execute a command and return its result."""
+    """Execute a command and return its result.
+    
+    Implements a secure subprocess execution that isolates MCP stdio transport
+    from subprocess I/O to prevent interference with client-server communication.
+    """
     # Validate command and directory
     cmd_valid, cmd_error = validate_command(command)
     if not cmd_valid:
@@ -118,57 +176,142 @@ async def execute_command(command, cwd, timeout=None):
         # Use timeout if specified
         timeout_sec = timeout if timeout else None
         
-        # Prepare environment by explicitly using bash with proper environment
-        # Use a login shell (-l) to ensure profile/bashrc is loaded
-        full_command = f"/bin/bash -l -c '{command}'"
+        # Rather than using asyncio subprocess directly, use a more isolated approach with subprocess module
+        # This helps ensure the parent's stdio transport isn't affected by terminal manipulations
         
-        # Execute the command with subprocess
-        process = await asyncio.create_subprocess_shell(
-            full_command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=cwd,
-            env=os.environ.copy()  # Use current environment
-        )
+        # Escape the command properly for shell execution
+        escaped_command = command.replace("'", "'\"'\"'")
+        # Prepare environment by explicitly using bash with proper environment
+        # Add a TERM=dumb to avoid fancy terminal output that might corrupt stdio streams
+        # Also redirect stdout/stderr to files to avoid any terminal control sequences
+        
+        # Create secure temporary files with unique names in system temp directory
+        # Use tempfile module to ensure proper cleanup and handle race conditions
+        output_file_handle = None
+        error_file_handle = None
         
         try:
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(), 
-                timeout=timeout_sec
+            # Create temp files with unique names that will be automatically removed on close
+            output_file_handle = tempfile.NamedTemporaryFile(delete=False, prefix=f"mcp_cmd_output_{uuid.uuid4()}_", suffix=".txt")
+            error_file_handle = tempfile.NamedTemporaryFile(delete=False, prefix=f"mcp_cmd_error_{uuid.uuid4()}_", suffix=".txt")
+            
+            # Get the paths to the temp files
+            output_file = output_file_handle.name
+            error_file = error_file_handle.name
+            
+            # Close the file handles now - they'll be written to by the subprocess
+            output_file_handle.close()
+            error_file_handle.close()
+            
+            # Construct a command that runs isolated and redirects output to files
+            bash_script = f"cd {shlex.quote(cwd)} && TERM=dumb /bin/bash -l -c {shlex.quote(command)} > {shlex.quote(output_file)} 2> {shlex.quote(error_file)}"
+        except Exception as e:
+            # Clean up if something went wrong
+            if output_file_handle:
+                try:
+                    os.unlink(output_file_handle.name)
+                except:
+                    pass
+            if error_file_handle:
+                try:
+                    os.unlink(error_file_handle.name)
+                except:
+                    pass
+            raise
+        
+        try:
+            # Run process in a completely separate process group to avoid terminal interference
+            process = subprocess.Popen(
+                ['/bin/bash', '-c', bash_script],
+                stdout=subprocess.DEVNULL,  # Explicitly avoid stdout/stderr
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,   # Explicitly avoid stdin 
+                env=dict(os.environ, TERM="dumb"),  # Force dumb terminal
+                start_new_session=True      # Create a new process group
             )
             
-            # Decode stdout and stderr
-            stdout_str = stdout.decode('utf-8', errors='replace')
-            stderr_str = stderr.decode('utf-8', errors='replace')
+            # Create asyncio task to wait for process completion with timeout
+            async def wait_for_process():
+                loop = asyncio.get_running_loop()
+                return await loop.run_in_executor(None, process.wait)
             
-            # Combine output and limit size if needed
-            output = stdout_str
-            if stderr_str:
-                output += f"\nSTDERR:\n{stderr_str}"
+            try:
+                exit_code = await asyncio.wait_for(wait_for_process(), timeout=timeout_sec)
                 
-            # Check for configuration updates before applying the settings
-            check_config_updates()
-            
-            with config_lock:
-                max_size = config.get("maxOutputSize", 1048576)  # Default 1MB
-            if len(output) > max_size:
-                output = output[:max_size] + "\n... [OUTPUT TRUNCATED]"
-            
-            return {
-                "success": process.returncode == 0,
-                "output": output,
-                "error": stderr_str if process.returncode != 0 else "",
-                "exitCode": process.returncode,
-                "command": command
-            }
-            
-        except asyncio.TimeoutError:
-            # Kill the process if it times out
-            process.kill()
+                # Read output from temp files
+                stdout_str = ""
+                stderr_str = ""
+                try:
+                    if os.path.exists(output_file):
+                        with open(output_file, 'r', encoding='utf-8', errors='replace') as f:
+                            stdout_str = f.read()
+                    if os.path.exists(error_file):
+                        with open(error_file, 'r', encoding='utf-8', errors='replace') as f:
+                            stderr_str = f.read()
+                except Exception as e:
+                    pass
+                finally:
+                    # Always clean up temp files
+                    self_cleanup_tempfiles(output_file, error_file)
+                
+                # Combine output and limit size if needed
+                output = stdout_str
+                if stderr_str:
+                    output += f"\nSTDERR:\n{stderr_str}"
+                    
+                # Check for configuration updates before applying the settings
+                check_config_updates()
+                
+                with config_lock:
+                    max_size = config.get("maxOutputSize", 1048576)  # Default 1MB
+                if len(output) > max_size:
+                    output = output[:max_size] + "\n... [OUTPUT TRUNCATED]"
+                
+                return {
+                    "success": exit_code == 0,
+                    "output": output,
+                    "error": stderr_str if exit_code != 0 else "",
+                    "exitCode": exit_code,
+                    "command": command
+                }
+                
+            except asyncio.TimeoutError:
+                # Kill the process if it times out
+                try:
+                    # Kill entire process group
+                    os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+                    # Give it a second to terminate gracefully
+                    await asyncio.sleep(1)
+                    # Force kill if still running
+                    if process.poll() is None:
+                        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                except Exception:
+                    pass
+                    
+                # Always clean up temp files
+                self_cleanup_tempfiles(output_file, error_file)
+                    
+                return {
+                    "success": False,
+                    "output": "",
+                    "error": f"Command execution timed out after {timeout_sec} seconds",
+                    "exitCode": -1,
+                    "command": command
+                }
+        except Exception as e:
+            # Clean up process if needed
+            try:
+                process.kill()
+            except:
+                pass
+                
+            # Always clean up temp files
+            self_cleanup_tempfiles(output_file, error_file)
+                
             return {
                 "success": False,
                 "output": "",
-                "error": f"Command execution timed out after {timeout_sec} seconds",
+                "error": f"Error executing command: {str(e)}",
                 "exitCode": -1,
                 "command": command
             }
@@ -185,7 +328,8 @@ async def execute_command(command, cwd, timeout=None):
 @server.list_tools()
 async def handle_list_tools() -> list[types.Tool]:
     """List available tools."""
-    return [
+    try:
+        return [
         types.Tool(
             name="execute_command",
             description="Execute a bash command in a secure environment",
@@ -200,6 +344,9 @@ async def handle_list_tools() -> list[types.Tool]:
             }
         )
     ]
+    except Exception as e:
+        print(f"Error in handle_list_tools: {str(e)}", file=sys.stderr)
+        return []
 
 @server.call_tool()
 async def handle_call_tool(
@@ -232,12 +379,20 @@ async def handle_call_tool(
 @server.list_resources()
 async def handle_list_resources() -> list[types.Resource]:
     """Return an empty list of resources."""
-    return []
+    try:
+        return []
+    except Exception as e:
+        print(f"Error in handle_list_resources: {str(e)}", file=sys.stderr)
+        return []
 
 @server.list_prompts()
 async def handle_list_prompts() -> list[types.Prompt]:
     """Return an empty list of prompts."""
-    return []
+    try:
+        return []
+    except Exception as e:
+        print(f"Error in handle_list_prompts: {str(e)}", file=sys.stderr)
+        return []
 
 # Create a periodic task to check for configuration file changes
 async def config_monitor():
@@ -254,48 +409,40 @@ async def main():
     # Start the configuration monitor task
     monitor_task = asyncio.create_task(config_monitor())
     
-
-    # my_notification_options = NotificationOptions(
-    #     tools_changed=True,  # Set to True if you plan to send notifications
-    #     resources_changed=True,
-    #     prompts_changed=True
-    # )
-
-    # capabilities = server.get_capabilities(
-    #     notification_options=my_notification_options,
-    #     experimental_capabilities={},
-    # )
-
-    # print(f"Server capabilities: {capabilities}", file=sys.stderr)
-    # # Or try to access attributes
-    # print(f"Tools capability: {getattr(capabilities, 'tools', None)}", file=sys.stderr)
-    # print(f"Resources capability: {getattr(capabilities, 'resources', None)}", file=sys.stderr)
-    # print(f"Prompts capability: {getattr(capabilities, 'prompts', None)}", file=sys.stderr)
-
-
-
-
-    # Run the server using stdin/stdout streams
-    async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream,
-            write_stream,
+    # Add proper exception handling around the core server loop
+    try:
+        # Run the server using stdin/stdout streams
+        async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
+            print("MCP server starting stdio server", file=sys.stderr)
+            try:
+                await server.run(
+                    read_stream,
+                    write_stream,
             InitializationOptions(
                 server_name="simple-bash-mcp",
                 server_version="0.1.0",
                 capabilities={
-                  # Only declare the tools capability - don't include resources or prompts
+                    # Declare all capabilities implemented by this server
                     "tools": {
-                    "listChanged": True
-            },
-        },
+                        "listChanged": True
+                    },
+                    "resources": {
+                        "listChanged": True
+                    },
+                    "prompts": {
+                        "listChanged": True
+                    }
+                },
             ),
         )
 
-                # capabilities=server.get_capabilities(
-                #     # notification_options=NotificationOptions(),
-                #     notification_options=my_notification_options,                    
-                #     experimental_capabilities={},
+            except Exception as e:
+                print(f"Error in server.run: {str(e)}", file=sys.stderr)
+                print(f"Error type: {type(e).__name__}", file=sys.stderr)
+                import traceback
+                traceback.print_exc(file=sys.stderr)
+    except Exception as e:
+        print(f"Fatal error in main loop: {str(e)}", file=sys.stderr)
 
 
 

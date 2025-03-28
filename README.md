@@ -9,6 +9,7 @@ A simple, secure Bash command execution MCP server.
 - Optional timeout and output size limitations
 - Simple, stateless design
 - Auto-update of configuration when config.json changes without server restart
+- Informative error messages that include guidance on what is allowed
 
 ## Security Controls
 
@@ -17,6 +18,7 @@ A simple, secure Bash command execution MCP server.
 - **Pattern Validation**: Prevents command injection attacks
 - **Output Limiting**: Prevents excessive data return
 - **Shell Isolation**: Commands run in a controlled bash environment
+- **Helpful Errors**: Error messages include information about what is allowed
 
 ## Tool Specification
 
@@ -54,6 +56,33 @@ The server uses a simple JSON configuration file at `src/simple_bash_mcp/config.
 - `maxOutputSize`: Maximum output size in bytes (default: 1MB)
 
 The configuration file is monitored for changes and automatically reloaded when modified, allowing you to update settings without restarting the server.
+
+## Error Handling
+
+When a command or directory is not allowed, the server provides informative error messages that include:
+
+- What went wrong (the specific command or directory that wasn't allowed)
+- What is allowed (a complete list of allowed commands or directories)
+- Additional context (for injection pattern detection)
+
+Example error messages:
+
+```
+Command 'rm' is not in the allowed commands list.
+
+Allowed commands are: cat, chmod, cp, dpkg, echo, find, git, grep, head, ls, mkdir, mv, node, npm, npx, pnpm, put-trash, pwd, python, python3, tail, touch, trash-list, trash-put, trash-restore, uv, wc, which
+```
+
+```
+Directory '/etc' is not in the allowed directories list.
+
+Allowed directories are:
+- /tmp
+- /home/jan/ai/claude/claude_fs
+- /home/jan/mcp
+
+Note: Subdirectories of these allowed directories are also permitted.
+```
 
 ## Quickstart
 
