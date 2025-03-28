@@ -4,6 +4,8 @@ import os
 import subprocess
 import shlex
 import signal
+import tempfile
+import uuid
 from pathlib import Path
 import sys
 import time
@@ -50,6 +52,31 @@ def check_config_updates():
 
 # Initialize configuration
 load_config()
+
+# Helper function to safely clean up temp files
+def self_cleanup_tempfiles(output_file, error_file):
+    """Helper function to safely clean up temporary files.
+    
+    This is designed to be robust against any errors and always attempt
+    to remove both files, even if an error occurs with one of them.
+    """
+    # First try to remove the output file
+    if output_file:
+        try:
+            if os.path.exists(output_file):
+                os.unlink(output_file)
+                print(f"MCP server: Successfully removed temp file: {output_file}", file=sys.stderr)
+        except Exception as e:
+            print(f"MCP server: Error removing temp file {output_file}: {str(e)}", file=sys.stderr)
+    
+    # Then try to remove the error file
+    if error_file:
+        try:
+            if os.path.exists(error_file):
+                os.unlink(error_file)
+                print(f"MCP server: Successfully removed temp file: {error_file}", file=sys.stderr)
+        except Exception as e:
+            print(f"MCP server: Error removing temp file {error_file}: {str(e)}", file=sys.stderr)
 
 server = Server("simple-bash-mcp")
 
@@ -143,12 +170,42 @@ async def execute_command(command, cwd, timeout=None):
         # Add a TERM=dumb to avoid fancy terminal output that might corrupt stdio streams
         # Also redirect stdout/stderr to files to avoid any terminal control sequences
         
-        # Create temporary files for output
-        output_file = os.path.join(cwd, ".mcp_cmd_output.txt")
-        error_file = os.path.join(cwd, ".mcp_cmd_error.txt")
+        # Create secure temporary files with unique names in system temp directory
+        # Use tempfile module to ensure proper cleanup and handle race conditions
+        output_file_handle = None
+        error_file_handle = None
         
-        # Construct a command that runs isolated and redirects output to files
-        bash_script = f"cd {shlex.quote(cwd)} && TERM=dumb /bin/bash -l -c {shlex.quote(command)} > {shlex.quote(output_file)} 2> {shlex.quote(error_file)}"
+        try:
+            # Create temp files with unique names that will be automatically removed on close
+            output_file_handle = tempfile.NamedTemporaryFile(delete=False, prefix=f"mcp_cmd_output_{uuid.uuid4()}_", suffix=".txt")
+            error_file_handle = tempfile.NamedTemporaryFile(delete=False, prefix=f"mcp_cmd_error_{uuid.uuid4()}_", suffix=".txt")
+            
+            # Get the paths to the temp files
+            output_file = output_file_handle.name
+            error_file = error_file_handle.name
+            
+            # Close the file handles now - they'll be written to by the subprocess
+            output_file_handle.close()
+            error_file_handle.close()
+            
+            print(f"MCP server: created temp files: {output_file} and {error_file}", file=sys.stderr)
+            
+            # Construct a command that runs isolated and redirects output to files
+            bash_script = f"cd {shlex.quote(cwd)} && TERM=dumb /bin/bash -l -c {shlex.quote(command)} > {shlex.quote(output_file)} 2> {shlex.quote(error_file)}"
+        except Exception as e:
+            print(f"MCP server: Error creating temp files: {str(e)}", file=sys.stderr)
+            # Clean up if something went wrong
+            if output_file_handle:
+                try:
+                    os.unlink(output_file_handle.name)
+                except:
+                    pass
+            if error_file_handle:
+                try:
+                    os.unlink(error_file_handle.name)
+                except:
+                    pass
+            raise
         
         print(f"MCP server: executing bash script: {bash_script}", file=sys.stderr)
         
@@ -184,14 +241,8 @@ async def execute_command(command, cwd, timeout=None):
                 except Exception as e:
                     print(f"MCP server: Error reading output files: {str(e)}", file=sys.stderr)
                 finally:
-                    # Clean up temp files
-                    try:
-                        if os.path.exists(output_file):
-                            os.unlink(output_file)
-                        if os.path.exists(error_file):
-                            os.unlink(error_file)
-                    except Exception as e:
-                        print(f"MCP server: Error cleaning up temp files: {str(e)}", file=sys.stderr)
+                    # Always clean up temp files
+                    self_cleanup_tempfiles(output_file, error_file)
                 
                 # Combine output and limit size if needed
                 output = stdout_str
@@ -229,14 +280,8 @@ async def execute_command(command, cwd, timeout=None):
                 except Exception as e:
                     print(f"MCP server: Error killing process: {str(e)}", file=sys.stderr)
                     
-                # Clean up temp files
-                try:
-                    if os.path.exists(output_file):
-                        os.unlink(output_file)
-                    if os.path.exists(error_file):
-                        os.unlink(error_file)
-                except Exception as e:
-                    print(f"MCP server: Error cleaning up temp files: {str(e)}", file=sys.stderr)
+                # Always clean up temp files
+                self_cleanup_tempfiles(output_file, error_file)
                     
                 return {
                     "success": False,
@@ -253,14 +298,8 @@ async def execute_command(command, cwd, timeout=None):
             except:
                 pass
                 
-            # Clean up temp files
-            try:
-                if os.path.exists(output_file):
-                    os.unlink(output_file)
-                if os.path.exists(error_file):
-                    os.unlink(error_file)
-            except Exception as e:
-                print(f"MCP server: Error cleaning up temp files: {str(e)}", file=sys.stderr)
+            # Always clean up temp files
+            self_cleanup_tempfiles(output_file, error_file)
                 
             return {
                 "success": False,
