@@ -63,14 +63,18 @@ def validate_command(command_str):
         
         # Check if base command is in allowed list
         if base_command not in config["allowedCommands"]:
-            return False, f"Command '{base_command}' is not in the allowed commands list"
+            # Format allowed commands into a readable list
+            allowed_cmds = ", ".join(sorted(config["allowedCommands"]))
+            return False, f"Command '{base_command}' is not in the allowed commands list.\n\nAllowed commands are: {allowed_cmds}"
         
         # Optional: Check for command injection patterns if strict validation is enabled
         if config.get("validateCommandsStrictly", True):
             injection_patterns = [";", "&&", "||", "`", "$(",  ">", "<", "|", "#"]
             for pattern in injection_patterns:
                 if pattern in command_str:
-                    return False, f"Potential command injection detected: '{pattern}'"
+                    # Also include list of injection patterns that should be avoided
+                    patterns_str = ", ".join([f"'{p}'" for p in injection_patterns])
+                    return False, f"Potential command injection detected: '{pattern}'\n\nThe following characters are not allowed when strict validation is enabled: {patterns_str}"
         
         return True, ""
 
@@ -88,7 +92,9 @@ def validate_directory(directory):
             if directory_path == allowed_path or allowed_path in directory_path.parents:
                 return True, ""
         
-        return False, f"Directory '{directory}' is not in the allowed directories list"
+        # Format allowed directories into a readable list
+        allowed_dirs = "\n- ".join(config["allowedDirectories"])
+        return False, f"Directory '{directory}' is not in the allowed directories list.\n\nAllowed directories are:\n- {allowed_dirs}\n\nNote: Subdirectories of these allowed directories are also permitted."
 
 async def execute_command(command, cwd, timeout=None):
     """Execute a command and return its result."""

@@ -7,6 +7,12 @@
   - Added cleanup for both timeout and error cases
   - Prevents zombie processes from accumulating
 
+### Improved
+- Enhanced error messages now include information about what is allowed
+  - Command restriction errors now list all allowed commands
+  - Directory restriction errors now list all allowed directories
+  - Injection detection errors now list all disallowed characters
+
 ## [0.1.0] - Initial Release
 - Basic MCP server implementation
 - Secure bash command execution with whitelists
