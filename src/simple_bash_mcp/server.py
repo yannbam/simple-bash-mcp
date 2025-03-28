@@ -6,6 +6,7 @@ import shlex
 import signal
 import tempfile
 import uuid
+import glob
 from pathlib import Path
 import sys
 import time
@@ -59,24 +60,43 @@ def self_cleanup_tempfiles(output_file, error_file):
     
     This is designed to be robust against any errors and always attempt
     to remove both files, even if an error occurs with one of them.
+    Also cleans up any stale temp files that might be left over from
+    previous runs that didn't exit properly.
     """
     # First try to remove the output file
     if output_file:
         try:
             if os.path.exists(output_file):
                 os.unlink(output_file)
-                print(f"MCP server: Successfully removed temp file: {output_file}", file=sys.stderr)
-        except Exception as e:
-            print(f"MCP server: Error removing temp file {output_file}: {str(e)}", file=sys.stderr)
+        except Exception:
+            pass
     
     # Then try to remove the error file
     if error_file:
         try:
             if os.path.exists(error_file):
                 os.unlink(error_file)
-                print(f"MCP server: Successfully removed temp file: {error_file}", file=sys.stderr)
-        except Exception as e:
-            print(f"MCP server: Error removing temp file {error_file}: {str(e)}", file=sys.stderr)
+        except Exception:
+            pass
+    
+    # Use a more aggressive approach to clean up any stray temp files
+    try:
+        # Get a list of all temp files older than 30 minutes
+        current_time = time.time()
+        temp_pattern = os.path.join(tempfile.gettempdir(), "mcp_cmd_*")
+        for temp_file in glob.glob(temp_pattern):
+            try:
+                # Check file age
+                file_age = current_time - os.path.getctime(temp_file)
+                # Remove if older than 30 minutes (1800 seconds)
+                if file_age > 1800:
+                    os.unlink(temp_file)
+            except Exception:
+                # Just continue if we can't remove a file
+                pass
+    except Exception:
+        # Just continue if cleanup of old files fails
+        pass
 
 server = Server("simple-bash-mcp")
 
@@ -127,15 +147,12 @@ def validate_directory(directory):
 async def execute_command(command, cwd, timeout=None):
     """Execute a command and return its result.
     
-    Important: This implementation carefully isolates subprocess I/O from the MCP server's
-    stdio transport to prevent interference with client-server communication.
+    Implements a secure subprocess execution that isolates MCP stdio transport
+    from subprocess I/O to prevent interference with client-server communication.
     """
-    print(f"MCP server: executing command '{command}' in '{cwd}'", file=sys.stderr)
-    
     # Validate command and directory
     cmd_valid, cmd_error = validate_command(command)
     if not cmd_valid:
-        print(f"MCP server: command validation failed: {cmd_error}", file=sys.stderr)
         return {
             "success": False,
             "error": cmd_error,
@@ -146,7 +163,6 @@ async def execute_command(command, cwd, timeout=None):
     
     dir_valid, dir_error = validate_directory(cwd)
     if not dir_valid:
-        print(f"MCP server: directory validation failed: {dir_error}", file=sys.stderr)
         return {
             "success": False,
             "error": dir_error,
@@ -159,7 +175,6 @@ async def execute_command(command, cwd, timeout=None):
     try:
         # Use timeout if specified
         timeout_sec = timeout if timeout else None
-        print(f"MCP server: timeout set to {timeout_sec} seconds", file=sys.stderr)
         
         # Rather than using asyncio subprocess directly, use a more isolated approach with subprocess module
         # This helps ensure the parent's stdio transport isn't affected by terminal manipulations
@@ -188,12 +203,9 @@ async def execute_command(command, cwd, timeout=None):
             output_file_handle.close()
             error_file_handle.close()
             
-            print(f"MCP server: created temp files: {output_file} and {error_file}", file=sys.stderr)
-            
             # Construct a command that runs isolated and redirects output to files
             bash_script = f"cd {shlex.quote(cwd)} && TERM=dumb /bin/bash -l -c {shlex.quote(command)} > {shlex.quote(output_file)} 2> {shlex.quote(error_file)}"
         except Exception as e:
-            print(f"MCP server: Error creating temp files: {str(e)}", file=sys.stderr)
             # Clean up if something went wrong
             if output_file_handle:
                 try:
@@ -206,8 +218,6 @@ async def execute_command(command, cwd, timeout=None):
                 except:
                     pass
             raise
-        
-        print(f"MCP server: executing bash script: {bash_script}", file=sys.stderr)
         
         try:
             # Run process in a completely separate process group to avoid terminal interference
@@ -239,7 +249,7 @@ async def execute_command(command, cwd, timeout=None):
                         with open(error_file, 'r', encoding='utf-8', errors='replace') as f:
                             stderr_str = f.read()
                 except Exception as e:
-                    print(f"MCP server: Error reading output files: {str(e)}", file=sys.stderr)
+                    pass
                 finally:
                     # Always clean up temp files
                     self_cleanup_tempfiles(output_file, error_file)
@@ -257,7 +267,6 @@ async def execute_command(command, cwd, timeout=None):
                 if len(output) > max_size:
                     output = output[:max_size] + "\n... [OUTPUT TRUNCATED]"
                 
-                print(f"MCP server: command completed with exit code {exit_code}", file=sys.stderr)
                 return {
                     "success": exit_code == 0,
                     "output": output,
@@ -268,7 +277,6 @@ async def execute_command(command, cwd, timeout=None):
                 
             except asyncio.TimeoutError:
                 # Kill the process if it times out
-                print(f"MCP server: command timed out after {timeout_sec} seconds", file=sys.stderr)
                 try:
                     # Kill entire process group
                     os.killpg(os.getpgid(process.pid), signal.SIGTERM)
@@ -277,8 +285,8 @@ async def execute_command(command, cwd, timeout=None):
                     # Force kill if still running
                     if process.poll() is None:
                         os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-                except Exception as e:
-                    print(f"MCP server: Error killing process: {str(e)}", file=sys.stderr)
+                except Exception:
+                    pass
                     
                 # Always clean up temp files
                 self_cleanup_tempfiles(output_file, error_file)
@@ -291,7 +299,6 @@ async def execute_command(command, cwd, timeout=None):
                     "command": command
                 }
         except Exception as e:
-            print(f"MCP server: Error in process execution: {str(e)}", file=sys.stderr)
             # Clean up process if needed
             try:
                 process.kill()
@@ -310,7 +317,6 @@ async def execute_command(command, cwd, timeout=None):
             }
             
     except Exception as e:
-        print(f"MCP server: Unexpected error: {str(e)}", file=sys.stderr)
         return {
             "success": False,
             "output": "",
@@ -407,7 +413,7 @@ async def main():
     try:
         # Run the server using stdin/stdout streams
         async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-            print("MCP server: stdio streams established", file=sys.stderr)
+            print("MCP server starting stdio server", file=sys.stderr)
             try:
                 await server.run(
                     read_stream,
@@ -431,12 +437,12 @@ async def main():
         )
 
             except Exception as e:
-                print(f"MCP server: Error in server.run: {str(e)}", file=sys.stderr)
-                print(f"MCP server: Error type: {type(e).__name__}", file=sys.stderr)
+                print(f"Error in server.run: {str(e)}", file=sys.stderr)
+                print(f"Error type: {type(e).__name__}", file=sys.stderr)
                 import traceback
                 traceback.print_exc(file=sys.stderr)
     except Exception as e:
-        print(f"MCP server: Fatal error in main loop: {str(e)}", file=sys.stderr)
+        print(f"Fatal error in main loop: {str(e)}", file=sys.stderr)
 
 
 
