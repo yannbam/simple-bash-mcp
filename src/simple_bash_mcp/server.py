@@ -176,8 +176,15 @@ async def execute_command(command, cwd, timeout=None):
         # Use timeout if specified
         timeout_sec = timeout if timeout else None
         
+<<<<<<< Updated upstream
         # Rather than using asyncio subprocess directly, use a more isolated approach with subprocess module
         # This helps ensure the parent's stdio transport isn't affected by terminal manipulations
+=======
+        # Prepare environment by explicitly using bash with proper environment
+        # Use a login shell (-l) to ensure profile/bashrc is loaded
+        # Use shlex.quote to properly escape the command for shell execution
+        full_command = f"/bin/bash -l -c {shlex.quote(command)}"
+>>>>>>> Stashed changes
         
         # Escape the command properly for shell execution
         escaped_command = command.replace("'", "'\"'\"'")
