@@ -3,7 +3,7 @@
     "ls", "cat", "echo", "pwd", "grep", "find", "head", "tail", "wc",
     "python", "python3", "uv", "git", "npm", "node", "npx",
     "mkdir", "touch", "put-trash", "cp", "mv", "chmod", "which", "pnpm", "dpkg",
-    "trash-list", "trash-put", "trash-restore", "sleep"
+    "trash-list", "trash-put", "trash-restore", "sleep", "tsx"
   ],
   "allowedDirectories": ["/tmp","/home/jan/ai/claude/claude_fs","/home/jan/mcp"],
   "validateCommandsStrictly": false,
