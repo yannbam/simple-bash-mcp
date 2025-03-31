@@ -179,9 +179,11 @@ async def execute_command(command, cwd, timeout=None):
         # Rather than using asyncio subprocess directly, use a more isolated approach with subprocess module
         # This helps ensure the parent's stdio transport isn't affected by terminal manipulations
         # Prepare environment by explicitly using bash with proper environment
-        # Use a login shell (-l) to ensure profile/bashrc is loaded
-        # Use shlex.quote to properly escape the command for shell execution
-        full_command = f"/bin/bash -l -c {shlex.quote(command)}"
+        # Use interactive mode (-i) to ensure .bashrc is properly loaded
+        # This is needed for variables like TWITTER_ID that are only set in interactive shells
+        full_command = f"""/bin/bash -i <<'EOF'
+{command}
+EOF"""
         
         # Escape the command properly for shell execution
         escaped_command = command.replace("'", "'\"'\"'")
@@ -208,7 +210,12 @@ async def execute_command(command, cwd, timeout=None):
             error_file_handle.close()
             
             # Construct a command that runs isolated and redirects output to files
-            bash_script = f"cd {shlex.quote(cwd)} && TERM=dumb /bin/bash -l -c {shlex.quote(command)} > {shlex.quote(output_file)} 2> {shlex.quote(error_file)}"
+            # Use interactive shell mode (-i) to ensure .bashrc is properly loaded
+            # This is needed for variables like TWITTER_ID that are only set in interactive shells
+            bash_script = f"""cd {shlex.quote(cwd)} && TERM=dumb /bin/bash -i <<'EOF' > {shlex.quote(output_file)} 2> {shlex.quote(error_file)}
+{command}
+EOF"""
+	    
         except Exception as e:
             # Clean up if something went wrong
             if output_file_handle:
@@ -276,7 +283,7 @@ async def execute_command(command, cwd, timeout=None):
                     "output": output,
                     "error": stderr_str if exit_code != 0 else "",
                     "exitCode": exit_code,
-                    "command": command
+                    "command": bash_script     #for debugging only! change back to command
                 }
                 
             except asyncio.TimeoutError:
