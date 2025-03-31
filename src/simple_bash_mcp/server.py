@@ -55,48 +55,28 @@ def check_config_updates():
 load_config()
 
 # Helper function to safely clean up temp files
-def self_cleanup_tempfiles(output_file, error_file):
-    """Helper function to safely clean up temporary files.
-    
-    This is designed to be robust against any errors and always attempt
-    to remove both files, even if an error occurs with one of them.
-    Also cleans up any stale temp files that might be left over from
-    previous runs that didn't exit properly.
-    """
-    # First try to remove the output file
-    if output_file:
-        try:
-            if os.path.exists(output_file):
-                os.unlink(output_file)
-        except Exception:
-            pass
-    
-    # Then try to remove the error file
-    if error_file:
-        try:
-            if os.path.exists(error_file):
-                os.unlink(error_file)
-        except Exception:
-            pass
-    
-    # Use a more aggressive approach to clean up any stray temp files
+def self_cleanup_tempfiles(*files):
+    """Helper function to safely clean up temporary files."""
+    for file in files:
+        if file:
+            try:
+                if os.path.exists(file):
+                    os.unlink(file)
+            except Exception:
+                pass
     try:
-        # Get a list of all temp files older than 30 minutes
         current_time = time.time()
         temp_pattern = os.path.join(tempfile.gettempdir(), "mcp_cmd_*")
         for temp_file in glob.glob(temp_pattern):
             try:
-                # Check file age
                 file_age = current_time - os.path.getctime(temp_file)
-                # Remove if older than 30 minutes (1800 seconds)
                 if file_age > 1800:
                     os.unlink(temp_file)
             except Exception:
-                # Just continue if we can't remove a file
                 pass
     except Exception:
-        # Just continue if cleanup of old files fails
         pass
+
 
 server = Server("simple-bash-mcp")
 
@@ -176,70 +156,42 @@ async def execute_command(command, cwd, timeout=None):
         # Use timeout if specified
         timeout_sec = timeout if timeout else None
         
-        # Rather than using asyncio subprocess directly, use a more isolated approach with subprocess module
-        # This helps ensure the parent's stdio transport isn't affected by terminal manipulations
-        # Prepare environment by explicitly using bash with proper environment
-        # Use interactive mode (-i) to ensure .bashrc is properly loaded
-        # This is needed for variables like TWITTER_ID that are only set in interactive shells
-        full_command = f"""/bin/bash -i <<'EOF'
-{command}
-EOF"""
-        
-        # Escape the command properly for shell execution
-        escaped_command = command.replace("'", "'\"'\"'")
-        # Prepare environment by explicitly using bash with proper environment
-        # Add a TERM=dumb to avoid fancy terminal output that might corrupt stdio streams
-        # Also redirect stdout/stderr to files to avoid any terminal control sequences
-        
-        # Create secure temporary files with unique names in system temp directory
-        # Use tempfile module to ensure proper cleanup and handle race conditions
         output_file_handle = None
         error_file_handle = None
         
         try:
-            # Create temp files with unique names that will be automatically removed on close
             output_file_handle = tempfile.NamedTemporaryFile(delete=False, prefix=f"mcp_cmd_output_{uuid.uuid4()}_", suffix=".txt")
             error_file_handle = tempfile.NamedTemporaryFile(delete=False, prefix=f"mcp_cmd_error_{uuid.uuid4()}_", suffix=".txt")
-            
-            # Get the paths to the temp files
+            script_file_handle = tempfile.NamedTemporaryFile(delete=False, prefix=f"mcp_cmd_script_{uuid.uuid4()}_", suffix=".sh")
             output_file = output_file_handle.name
             error_file = error_file_handle.name
-            
-            # Close the file handles now - they'll be written to by the subprocess
+            script_file = script_file_handle.name
+            with open(script_file, "w") as f:
+                f.write(f"source ~/.bashrc\ncd {shlex.quote(cwd)}\n{command}\n")
             output_file_handle.close()
             error_file_handle.close()
-            
-            # Construct a command that runs isolated and redirects output to files
-            # Use interactive shell mode (-i) to ensure .bashrc is properly loaded
-            # This is needed for variables like TWITTER_ID that are only set in interactive shells
-            bash_script = f"""cd {shlex.quote(cwd)} && TERM=dumb /bin/bash -i <<'EOF' > {shlex.quote(output_file)} 2> {shlex.quote(error_file)}
-{command}
-EOF"""
-	    
+            script_file_handle.close()
+            bash_script = f"""TERM=dumb script -q -c '/bin/bash -l -i < {shlex.quote(script_file)}' /dev/null > {shlex.quote(output_file)} 2> {shlex.quote(error_file)}"""
         except Exception as e:
-            # Clean up if something went wrong
-            if output_file_handle:
-                try:
-                    os.unlink(output_file_handle.name)
-                except:
-                    pass
-            if error_file_handle:
-                try:
-                    os.unlink(error_file_handle.name)
-                except:
-                    pass
+            for handle in (output_file_handle, error_file_handle, script_file_handle):
+                if handle and os.path.exists(handle.name):
+                    try:
+                        os.unlink(handle.name)
+                    except:
+                        pass
             raise
         
         try:
             # Run process in a completely separate process group to avoid terminal interference
             process = subprocess.Popen(
-                ['/bin/bash', '-c', bash_script],
-                stdout=subprocess.DEVNULL,  # Explicitly avoid stdout/stderr
+                bash_script,
+                shell=True,
+                stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                stdin=subprocess.DEVNULL,   # Explicitly avoid stdin 
-                env=dict(os.environ, TERM="dumb"),  # Force dumb terminal
-                start_new_session=True      # Create a new process group
+                stdin=subprocess.DEVNULL,
+                start_new_session=True
             )
+
             
             # Create asyncio task to wait for process completion with timeout
             async def wait_for_process():
@@ -263,8 +215,8 @@ EOF"""
                     pass
                 finally:
                     # Always clean up temp files
-                    self_cleanup_tempfiles(output_file, error_file)
-                
+                    self_cleanup_tempfiles(output_file, error_file, script_file)
+
                 # Combine output and limit size if needed
                 output = stdout_str
                 if stderr_str:
@@ -283,7 +235,7 @@ EOF"""
                     "output": output,
                     "error": stderr_str if exit_code != 0 else "",
                     "exitCode": exit_code,
-                    "command": bash_script     #for debugging only! change back to command
+                    "command": command
                 }
                 
             except asyncio.TimeoutError:
@@ -300,8 +252,8 @@ EOF"""
                     pass
                     
                 # Always clean up temp files
-                self_cleanup_tempfiles(output_file, error_file)
-                    
+                self_cleanup_tempfiles(output_file, error_file, script_file)
+
                 return {
                     "success": False,
                     "output": "",
@@ -317,8 +269,8 @@ EOF"""
                 pass
                 
             # Always clean up temp files
-            self_cleanup_tempfiles(output_file, error_file)
-                
+            self_cleanup_tempfiles(output_file, error_file, script_file)
+                            
             return {
                 "success": False,
                 "output": "",
